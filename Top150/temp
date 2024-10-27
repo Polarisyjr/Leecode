@@ -1,0 +1,192 @@
+`include "sys_defs.svh"
+
+/* in this code we use the sq only
+    and for the load instruction we only allow it issue when all of the store instructions before it has completed
+    there is no load queue
+*/
+
+module lsq(
+    input clock, reset,
+    // input from dispatch stage
+    input logic     [`SUPERSCALAR_WAYS - 1 : 0] dispatch_is_store,  // the store insts dispatched in this cycle;
+    input logic     [`SUPERSCALAR_WAYS - 1 : 0] dispatch_is_load,   // the load insts dispatched in this cycle;
+
+    // output to RS
+    output logic    [`SUPERSCALAR_WAYS - 1 : 0] load_en, // which one is load
+    // the above might be omitted if the connection section includes reg to temporarily store the enable bits from the last cycle.
+    output LSQ_IDX  [`SUPERSCALAR_WAYS - 1 : 0] load_indexes, // to compute how many store before this load?
+
+    // input from FU, need to tag valid bit, store's&load's addr, store's data
+    input LSQ_ENTRY [`NUM_FU_STORE - 1 : 0]     store_entry,  // the store entity completed in this cycle;
+    input LSQ_ENTRY [`NUM_FU_LOAD - 1 : 0]      load_entry, // only addr and size is vaild when input this packet   
+    
+    // state
+    input logic     [`SUPERSCALAR_WAYS - 1 :0]  retire_enable,   
+
+    // output the entry when request for access the Dcache, after that, we set the ready bit to 1 
+    // input  DATA                              load_data,
+    output LSQ_ENTRY [`NUM_FU_LOAD - 1 : 0]     request_load, // when forwarding fail, request dcache
+    // nego
+    output LSQ_SPACE                            remain, // how many store next cycle could dispatch
+    output logic    [`SUPERSCALAR_WAYS - 1 : 0] load_complete // for nego with complete stage 
+    // output LSQ_IDX                           store_before_load_counter, // example: there is 5 store before this load
+);
+    logic           [`LSQ_DEPTH - 1 : 0]        lsq_enable;    // current lsq enable
+    logic           [`LSQ_DEPTH - 1 : 0]        next_lsq_enable;  // the remain space in the lsq
+    logic           [`NUM_FU_LOAD - 1 : 0]      wait_lsq;   // use for stall load 1 means the load can not go into sq
+    LSQ_QUEUE                                   current_lsq , next_lsq;
+    logic [`SUPERSCALAR_WAYS-1:0][`LSQ_IDX_WIDTH-1:0] head_idx;  // head+0, head+1, head+2
+    logic [`SUPERSCALAR_WAYS-1:0][`LSQ_IDX_WIDTH-1:0] tail_idx;  // tail+0, tail+1, tail+2
+
+    parking_selector_input #(
+        .POOL_SIZE(`LSQ_DEPTH),
+        .MAX_INPUT_SIZE(`SUPERSCALAR_WAYS),
+        .data_t(LSQ_ENTRY)
+    ) parking_selector_input_inst (
+        .input_enable(dispatch_is_store),
+        .input_data('{default: '0}),
+        .data_vector(current_lsq.lsq_entry),
+        .free_vector(lsq_enable),
+        .next_free_vector(next_lsq_enable),
+        .input_served_mask(),
+        .input_assigned_mask(),
+        .input_assigned_spot(),
+        .next_data_vector(next_lsq.lsq_entry),
+        .dbg_gnt_bus()
+    );
+
+    assign load_en = dispatch_is_load;
+    assign store_en = dispatch_is_store;
+    assign remain = $countones(lsq_enable);
+    assign retire_cnt = $countones(retire_enable);
+    assign store_cnt = $countones(is_store);
+    always_comb begin 
+        for(int i = 0; i < retire_cnt; i++) begin 
+            head_idx[i] = (current_lsq.head+i)%`LSQ_DEPTH; 
+        end 
+        for(int i = 0; i < store_cnt; i++) begin 
+            tail_idx[i] = (current_lsq.tail+i)%`LSQ_DEPTH; 
+        end 
+    end 
+
+    //update next_lsq, including the new element, head, and tail
+    always_comb begin
+        next_lsq = current_lsq;
+        if (current_lsq.state == EMPTY &  store_cnt-retire_cnt > 0) begin 
+            next_lsq.state = NON_EMPTY;  
+        end else if (current_lsq.state == NON_EMPTY & (current_lsq.lsq_size-retire_cnt+store_cnt == 0)) begin 
+            next_lsq.state = EMPTY; 
+        end 
+        for(int i=0; i<`SUPERSCALAR_WAYS; i++) begin
+            if(dispatch_is_store[i]) begin    
+                next_lsq.lsq_entry[tail_idx[i]] = '{default:'0};
+                next_lsq.lsq_entry[tail_idx[i]].entry_idx = tail_idx[i];
+            end
+        end
+        next_lsq.tail = (next_lsq.head + store_cnt)%`LSQ_DEPTH;
+        next_lsq.head = (next_lsq.head + retire_cnt)%`LSQ_DEPTH;
+    end
+
+    // the index to RS
+    always_comb begin
+        for (int i = 0 ;  i < `SUPERSCALAR_WAYS ; i++)begin
+            if(dispatch_is_load[i]) begin
+                load_indexes[i] = next_lsq.tail;
+            end
+        end
+    end
+
+    //complete update store entry
+    //FSM
+    always_ff@(posedge clock)begin
+        if(reset)begin
+            current_lsq.lsq_entry <= '{default: '0};
+            current_lsq.state <= EMPTY;
+            current_lsq.head <= 0;
+            current_lsq.tail <= 0;
+            current_lsq.lsq_size <= 0;
+        end else begin
+            current_lsq <= next_lsq;
+        end
+    end
+    
+
+    //mask
+    LSQ_MASK mask_internal;
+    DATA     data_internal;
+    always_comb begin
+        mask_internal = '0;
+        data_internal = '0;
+        for (int i = 0 ;  i < `NUM_FU_LOAD ; i++)begin
+            if(!wait_lsq[i])begin
+                load_entry[i].ready = 1;
+                for(int j = 0 ; j < `LSQ_DEPTH;i++)begin
+                    if(current_lsq.lsq_entry[j].entry_idx < load_entry[i].entry_idx)begin
+                        if(current_lsq.lsq_entry[j].addr = load_entry[i].addr)begin
+                            mask_internal = mask_internal | current_lsq.lsq_entry[j].mask;
+                            data_internal = data_internal | current_lsq.lsq_entry[j].data;
+                        end                   
+                    end
+                end
+            end
+            // forwarding
+            if(mask_internal & load_entry[i].mask == load_entry[i].mask)begin
+                load_entry[i].data  = data_internal[load_entry[i].size-1:0];
+            end else begin
+                request_load[i] =  load_entry[i];// TODO from $D
+            end
+        end
+    end
+
+    //input from the complete stage
+    always_comb begin
+        for(int i = 0 ; i < `LSQ_DEPTH;i++)begin
+            for (int j = 0; j < `NUM_FU_STORE; j++)begin
+                if(current_lsq.lsq_entry[i].entry_idx == store_entry[j].entry_idx)begin
+                    current_lsq.lsq_entry[i].ready = 1;
+                end else begin
+                    current_lsq.lsq_entry[i].ready = 0;
+                end
+            end
+        end
+    end
+                    
+    //wait_lsq
+    always_comb begin
+        wait_lsq = 0; 
+        for(int i = 0 ; i <`NUM_FU_LOAD ; i++)begin
+            for(int j = 0 ; j < `LSQ_DEPTH ; j++)begin
+                if(current_lsq.lsq_entry[j].entry_idx < load_entry[i].entry_idx)
+
+            end
+        end
+    end
+    always_comb begin
+        wait_lsq =1'b1;
+        for(int i = 0 ; i <`NUM_FU_LOAD ; i++)begin
+            for(int j = 0 ; j < `LSQ_DEPTH ; j++)begin
+                    if(current_lsq.lsq_entry[j].entry_idx < load_entry[i].entry_idx)begin
+                        // If any `ready` is 0, keep `wait_lsq` as 1
+                        if (~current_lsq.lsq_entry[j].ready) begin
+                            wait_lsq[i] = 1;
+                            break;  // Exit loop early if any entry is not ready
+                        end
+                        // If all checked entries are `ready`, set `wait_lsq` to 0
+                        wait_lsq[i] = 0;
+                    end
+            end
+        end 
+    end
+
+    // store_before_load_counter
+    /*
+    always_comb begin
+        store_before_load_counter = 0;
+        for(int i = 0 ; i < `LSQ_DEPTH;i++)begin
+            if(current_lsq.lsq_entry[i].entry_idx < load_entry.entry_idx)begin
+                store_before_load_counter++ ;
+            end
+        end
+    end
+    */
+endmodule
