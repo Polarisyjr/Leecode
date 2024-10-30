@@ -52,13 +52,19 @@ module lsq(
     // convert input EXECUTE_PACKET to store_entry
     MEM_BLOCK       [`NUM_FU_STORE - 1 : 0]     store_entry_data_block;     
     MEM_BLOCK_ADDR  [`NUM_FU_STORE - 1 : 0]     store_entry_block_addr;
-    MEM_SIZE        [`NUM_FU_STORE - 1 : 0]     store_entry_data_size;
+    MEM_SIZE        [`NUM_FU_STORE - 1 : 0]     store_entry_data_size;  
+    MEM_BLOCK_ADDR                              load_entry_block_addr;
+    MEM_SIZE                                    load_entry_data_size;
+    BYTE_MASK                                   load_entry_byte_mask;
     always_comb begin
         for(int i=0; i<`NUM_FU_STORE; i++) begin  // result_value-->addr; rs2-->store_data
             store_entry_data_block[i] = align_data_to_block(fu_store_packet[i].result_value, fu_store_packet[i].rs2_value, fu_store_packet[i].mem_size);
             store_entry_block_addr[i].addr = fu_store_packet[i].result_value[31:`BYTE_ADDR_BITS]; // 3 bits offset
             store_entry_data_size[i]  = fu_store_packet[i].mem_size; // 1 or 2 or 4 or 8 bytes?
         end
+        load_entry_block_addr.addr = fu_load_packet.load_addr[31:`BYTE_ADDR_BITS]; // 3 bits offset
+        load_entry_data_size  = fu_load_packet.mem_size; // 1 or 2 or 4 or 8 bytes?
+        load_entry_byte_mask = get_byte_mask(fu_load_packet.load_addr, fu_load_packet.mem_size); 
     end
 
     LSQ_QUEUE                                   current_lsq , next_lsq; // state
@@ -152,32 +158,58 @@ module lsq(
         end
     end
     
+    
     load_state_t current_load_state, next_load_state;
+    logic load_can_forwarding;
+    MEM_BLOCK store_data_before_load;
+    BYTE_MASK store_mask_before_load;
+    // dcache choose load or store
+    assign dcache_serve_store = (current_lsq.entry_state[current_lsq.head] == RETIRED);
+    assign dcache_serve_load = (!dcache_serve_store & current_load_state == CAN_ISSUE);
+
     always_comb begin
         next_load_state = current_load_state;
         case (current_load_state)
             INVALID: begin
-                if(fu_load_enable) begin
-                    next_load_state = WAITING;
-                end
+                next_load_state  = fu_load_enable ? WAITING : INVALID;
             end
             WAITING: begin
-                if(!wait_store_before_load(fu_load_packet, current_lsq)) begin
-                    next_load_state = FORWARD;
-                end    
+                next_load_state  = (wait_store_before_load(fu_load_packet, current_lsq)==0) ? FORWARD : WAITING;  
+            end
+            CAN_FORWARD: begin
+                if(load_enable) begin
+                    if_load_can_forward_from_store_queue(fu_load_packet, current_lsq, load_can_forwarding, store_mask_before_load, store_data_before_load);
+                    // TODO:: reg记录mask和data给dcache后用
+                    if(load_can_forwarding) begin
+                        next_load_state = COMPLETED;
+                    end
+                    else begin
+                        next_load_state = CAN_ISSUE;
+                    end
+                end 
             end
 
-            FORWARD: begin
-
+            CAN_ISSUE: begin
+                if(dcache_serve_load) begin
+                    //request_to_dcache_packet.block_data = ?
+                    request_to_dcache_packet.is_load = 1;
+                    request_to_dcache_packet.block_addr = load_entry_block_addr;
+                    request_to_dcache_packet.byte_mask = load_entry_byte_mask;
+                    request_to_dcache_enable = 1;
+                end else if(dcache_serve_store) begin
+                    request_to_dcache_packet.is_load = 0;
+                    request_to_dcache_packet.block_data = current_lsq.lsq_entry[current_lsq.head].data;
+                    request_to_dcache_packet.block_addr = current_lsq.lsq_entry[current_lsq.head].addr;
+                    request_to_dcache_packet.byte_mask = current_lsq.lsq_entry[current_lsq.head].mask;
+                    request_to_dcache_enable = 1;
+                end
+                next_load_state  = (dcache_request_valid & dcache_response_valid) ? COMPLETE : CAN_ISSUE;
             end
 
-            ISSUE: begin
-
+            COMPLETED: begin // TODO::不知道TODO啥
+                next_load_state  = load_done ? INVALID : COMPLETE;
             end
-
-            COMPLETED: begin
-
-            end
+            default: next_load_state = INVALID;
         endcase
     end
 
@@ -222,6 +254,41 @@ module lsq(
             end
         end
         return wait_lsq;
+    endfunction
+
+    function automatic void if_load_can_forward_from_store_queue(input EXECUTE_PACKET fu_load_packet, input LSQ_QUEUE current_lsq, output logic load_can_forwarding, output BYTE_MASK store_mask_before_load, output BYTE_MASK store_data_before_load);
+        load_can_forwarding = 0;
+        BYTE_MASK mask_internal;
+        MEM_BLOCK data_internal;
+        mask_internal = '0;
+        data_internal = '{default:'0};
+        BYTE_MASK load_mask;
+        load_mask = get_byte_mask(fu_load_packet.load_addr, fu_load_packet.mem_size); 
+
+        if(current_lsq.head < fu_load_packet.entry_idx) begin
+            for(int j = current_lsq.head; j < fu_load_packet.entry_idx ; j++) begin
+                if(current_lsq.lsq_entry[j].addr = fu_load_packet.load_addr) begin
+                        merge_byte_mask_and_data(current_lsq.lsq_entry[j].data, current_lsq.lsq_entry[j].mask, data_internal, mask_internal, data_internal, mask_internal);
+                    end  
+                end
+        // for the condition that the head is larger than the entry_idx
+        end else if(current_lsq.head > fu_load_packet.entry_idx) begin
+            for (int j = current_lsq.head; j != fu_load_packet.entry_idx; j=(j+1)%`LSQ_DEPTH) begin
+                if(current_lsq.lsq_entry[j].addr = fu_load_packet.load_addr) begin
+                    merge_byte_mask_and_data(current_lsq.lsq_entry[j].data, current_lsq.lsq_entry[j].mask, data_internal, mask_internal, data_internal, mask_internal);
+                end  
+            end
+        end
+        // forwarding
+        if((mask_internal & load_mask) == load_mask) begin
+            load_can_forwarding = 1;
+            store_data_before_load = mask_block_data(load_mask, data_internal);
+        // load can not forwarding then go to $D
+        end else begin
+            load_can_forwarding = 0;
+            store_data_before_load = data_internal;
+            store_mask_before_load = mask_internal;
+        end
     endfunction
 
 
