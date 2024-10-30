@@ -744,6 +744,26 @@ typedef struct packed {
         $display("---------------------------------------");
     endfunction
 `endif 
+
+// LSQ_VARS
+`define LSQ_DEPTH 32
+`define LSQ_IDX_WIDTH $clog2(`LSQ_DEPTH) 
+typedef logic [`LSQ_IDX_WIDTH:0] LSQ_SPACE; 
+typedef logic [`LSQ_IDX_WIDTH-1:0] LSQ_IDX; 
+typedef logic[7:0] BYTE_MASK; // this is the 8 bit mask indicating which bytes are modified in a memory block 
+typedef enum logic [1:0] {
+    INVALID  = 2'd0,
+    WAITING  = 2'd1,
+    READY    = 2'd2,
+    RETIRED  = 2'd3
+} STORE_STATE;
+typedef enum logic [2:0] {
+    INVALID  = 3'd0,
+    WAITING  = 3'd1,
+    FORWARD  = 3'd2,
+    ISSUE    = 3'd3,
+    COMPLETED= 3'd4
+} LOAD_STATE;
 typedef struct packed {
     ADDR        addr;
     MEM_BLOCK   data;
@@ -751,17 +771,14 @@ typedef struct packed {
     LSQ_IDX     entry_idx;
     MEM_SIZE    mem_size; 
 } LSQ_ENTRY; 
-
 typedef struct packed {
     LSQ_ENTRY [`LSQ_DEPTH-1:0] lsq_entry;
-    logic [`LSQ_DEPTH-1:0] ready;
-    logic [`LSQ_DEPTH-1:0] retired;
+    STORE_STATE [`LSQ_DEPTH-1:0] entry_state;
     FIFO_STATE state;
     LSQ_IDX    tail;  
     LSQ_IDX    head;  
     LSQ_SPACE  lsq_size;
 } LSQ_QUEUE;
-
 typedef struct packed {
     logic valid; // this indicates whether the FU should be taking this packet  
     DECODER_PACKET decoder_packet; 
@@ -790,8 +807,8 @@ typedef struct packed {
     MEM_BLOCK load_block_data; // to be used in block to block
     ADDR      load_addr; // store addr is result_value
     LSQ_IDX   entry_idx;
-    MEM_SIZE mem_size; 
-    logic    rd_unsigned;
+    MEM_SIZE  mem_size; 
+    logic     rd_unsigned;
 } EXECUTE_PACKET; 
 
 
@@ -1037,7 +1054,6 @@ typedef enum logic [1:0] {
 } FIFO_STATE;
 
 
-typedef logic[7:0] BYTE_MASK; // this is the 8 bit mask indicating which bytes are modified in a memory block 
 typedef logic [`LOAD_NUM-1:0] LSQ_LOAD_MASK; 
 // when passed into dcache, this is a one-hot encoding indicating which load this is 
 // when returned from dcache, this is a mask indicating which loads have been served 
