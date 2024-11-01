@@ -163,12 +163,20 @@ module lsq(
     logic load_can_forwarding;
     MEM_BLOCK store_data_before_load;
     BYTE_MASK store_mask_before_load;
+    logic tmp_load_can_forwarding;
+    MEM_BLOCK tmp_store_data_before_load;
+    BYTE_MASK tmp_store_mask_before_load;
     // dcache choose load or store
     assign dcache_serve_store = (current_lsq.entry_state[current_lsq.head] == RETIRED);
     assign dcache_serve_load = (!dcache_serve_store & current_load_state == CAN_ISSUE);
 
     always_comb begin
         next_load_state = current_load_state;
+        tmp_load_can_forwarding    = load_can_forwarding;
+        tmp_store_data_before_load = store_data_before_load;
+        tmp_store_mask_before_load = store_mask_before_load;
+        load_can_cdb = 0;
+        load_result_packet = '{default: '0};
         case (current_load_state)
             INVALID: begin
                 next_load_state  = fu_load_enable ? WAITING : INVALID;
@@ -178,9 +186,8 @@ module lsq(
             end
             CAN_FORWARD: begin
                 if(load_enable) begin
-                    if_load_can_forward_from_store_queue(fu_load_packet, current_lsq, load_can_forwarding, store_mask_before_load, store_data_before_load);
-                    // TODO:: reg记录mask和data给dcache后用
-                    if(load_can_forwarding) begin
+                    if_load_can_forward_from_store_queue(fu_load_packet, current_lsq, tmp_load_can_forwarding, tmp_store_mask_before_load, tmp_store_data_before_load);
+                    if(tmp_load_can_forwarding) begin
                         next_load_state = COMPLETED;
                     end
                     else begin
@@ -206,8 +213,15 @@ module lsq(
                 next_load_state  = (dcache_request_valid & dcache_response_valid) ? COMPLETE : CAN_ISSUE;
             end
 
-            COMPLETED: begin // TODO::不知道TODO啥
-                next_load_state  = load_done ? INVALID : COMPLETE;
+            COMPLETED: begin 
+                if(load_can_forwarding)begin
+                    fu_load_packet.load_block_data =  store_data_before_load;                    
+                end else begin
+                    fu_load_packet.load_block_data = overwrite_loaddata(dcache_response.block_data, load_entry_byte_mask, store_data_before_load, store_mask_before_load);
+                end
+                load_can_cdb     = 1;
+                load_result_packet = fu_load_packet;
+                next_load_state  = load_done ? INVALID : COMPLETED;
             end
             default: next_load_state = INVALID;
         endcase
@@ -223,9 +237,15 @@ module lsq(
             current_lsq.head <= 0;
             current_lsq.tail <= 0;
             current_lsq.lsq_size <= 0;
+            load_can_forwarding <= 0;
+            store_mask_before_load <= 0;
+            store_data_before_load <= 0;
         end else begin
             current_lsq <= next_lsq;
             current_load_state <= next_load_state;
+            load_can_forwarding <= tmp_load_can_forwarding;
+            store_mask_before_load <= tmp_store_mask_before_load;
+            store_data_before_load <= tmp_store_data_before_load;
         end
     end
 
@@ -291,6 +311,16 @@ module lsq(
         end
     endfunction
 
+    function automatic MEM_BLOCK overwrite_loaddata(input MEM_BLOCK response_data, input BYTE_MASK data_byte_mask, input MEM_BLOCK store_data_before_load, input BYTE_MASK store_mask_before_load);
+        MEM_BLOCK overwriten_loaddata;
+        overwriten_loaddata = response_data;
+        for(int i=0; i<8; i++) begin
+            if(data_byte_mask[i] & store_mask_before_load[i]) begin
+                overwriten_loaddata.byte_level[i] = store_data_before_load.byte_level[i];
+            end
+        end
+        return overwriten_loaddata;
+    endfunction
 
 
 /*// LOAD FSM

@@ -110,10 +110,30 @@ typedef logic [3:0] MEM_TAG;
 typedef logic[`BHR_WIDTH-1:0] BHR_ENTRY;  
 typedef logic[`DIRP_COUNTER_BITS-1:0] DIRP_COUNTER; 
 typedef DIRP_COUNTER [`DIRP_PHT_ENTRY_NUM-1:0] DIRP_PHT; 
-function automatic DIRP_COUNTER DIRP_COUNTER_NULL(); 
-    // initialize all counters to weakly not taken (0111....111) 
+
+typedef enum logic [1:0] {
+    STRONG_NT = 2'h0,
+    WEAK_NT   = 2'h1,
+    WEAK_T    = 2'h2,
+    STRONG_T  = 2'h3
+} BRANCH_PREDICTOR_INITIAL;
+
+typedef enum logic [2:0] {
+    GAG    = 3'h0,
+    GAP    = 3'h1,
+    PAG    = 3'h2,
+    PAP    = 3'h3,
+    GSHARE = 3'h4
+} BRANCH_PREDICTOR_TYPE;
+
+function automatic DIRP_COUNTER DIRP_COUNTER_INITIAL(input BRANCH_PREDICTOR_INITIAL bp_initial); 
     DIRP_COUNTER counter;
-    counter = {1'b0, {(`DIRP_COUNTER_BITS-1){1'b1}}};
+    case(bp_initial)
+        STRONG_T:  counter = {(`DIRP_COUNTER_BITS){1'b1}};
+        WEAK_T:    counter = {1'b1, {(`DIRP_COUNTER_BITS-1){1'b0}}};
+        WEAK_NT:   counter = {1'b0, {(`DIRP_COUNTER_BITS-1){1'b1}}};
+        STRONG_NT: counter = {(`DIRP_COUNTER_BITS){1'b0}};
+    endcase
     return counter;  
 endfunction 
 
@@ -215,7 +235,7 @@ typedef struct packed {
     logic [32-`MEM_VALID_ADDR_BITS-1:0] other; 
     logic [`MEM_VALID_ADDR_BITS-`DCACHE_SET_IDX_BITS-`BYTE_ADDR_BITS-1:0] tag; 
     logic [`DCACHE_SET_IDX_BITS-1:0] set_idx; 
-    logic [`BYTE_ADDR_BITS-1:0] reserved; // first 3 bits are useless 
+    logic [`BYTE_ADDR_BITS-1:0] offset; // first 3 bits are useless 
 } DCACHE_ADDR;
 
 typedef union packed {
@@ -744,26 +764,30 @@ typedef struct packed {
         $display("---------------------------------------");
     endfunction
 `endif 
-
 // LSQ_VARS
+// instruction queue
+typedef enum logic [1:0] {
+    EMPTY,
+    NON_EMPTY
+} FIFO_STATE;
 `define LSQ_DEPTH 32
 `define LSQ_IDX_WIDTH $clog2(`LSQ_DEPTH) 
 typedef logic [`LSQ_IDX_WIDTH:0] LSQ_SPACE; 
 typedef logic [`LSQ_IDX_WIDTH-1:0] LSQ_IDX; 
 typedef logic[7:0] BYTE_MASK; // this is the 8 bit mask indicating which bytes are modified in a memory block 
 typedef enum logic [1:0] {
-    INVALID  = 2'd0,
-    WAITING  = 2'd1,
-    READY    = 2'd2,
-    RETIRED  = 2'd3
-} STORE_STATE;
+    LSQ_STORE_INVALID  = 2'd0,
+    LSQ_STORE_WAITING  = 2'd1,
+    LSQ_STORE_READY    = 2'd2,
+    LSQ_STORE_RETIRED  = 2'd3
+} LSQ_STORE_STATE;
 typedef enum logic [2:0] {
-    INVALID  = 3'd0,
-    WAITING  = 3'd1,
-    FORWARD  = 3'd2,
-    ISSUE    = 3'd3,
-    COMPLETED= 3'd4
-} LOAD_STATE;
+    LSQ_LOAD_INVALID  = 3'd0,
+    LSQ_LOAD_WAITING  = 3'd1,
+    LSQ_LOAD_CAN_FORWARD  = 3'd2,
+    LSQ_LOAD_CAN_ISSUE    = 3'd3,
+    LSQ_LOAD_COMPLETED= 3'd4
+} LSQ_LOAD_STATE;
 typedef struct packed {
     ADDR        addr;
     MEM_BLOCK   data;
@@ -773,7 +797,7 @@ typedef struct packed {
 } LSQ_ENTRY; 
 typedef struct packed {
     LSQ_ENTRY [`LSQ_DEPTH-1:0] lsq_entry;
-    STORE_STATE [`LSQ_DEPTH-1:0] entry_state;
+    LSQ_STORE_STATE [`LSQ_DEPTH-1:0] entry_state;
     FIFO_STATE state;
     LSQ_IDX    tail;  
     LSQ_IDX    head;  
@@ -809,7 +833,34 @@ typedef struct packed {
     LSQ_IDX   entry_idx;
     MEM_SIZE  mem_size; 
     logic     rd_unsigned;
-} EXECUTE_PACKET; 
+} EXECUTE_PACKET;
+/*typedef struct packed {
+    logic valid; // this indicates whether the FU should be taking this packet  
+    DECODER_PACKET decoder_packet; 
+    PREG_IDX  t; 
+    PREG_IDX  t1; // maybe we don't need this 
+    PREG_IDX  t2; // maybe we don't need this 
+
+    FU_TAG     tag; 
+    BMASK      b_mask;
+    BRANCH_TAG branch_tag;
+    
+    DATA      rs1_value; // to be read from regfile 
+    DATA      rs2_value; // to be read from regfile 
+
+    DATA      result_value; // to be calculated, initialized to 0 
+
+    // mult
+    MULT_PACKET_INTERNAL mult_packet;
+    // branch prediction related 
+    logic    branch_taken; 
+    ADDR    branch_target; 
+    logic    branch_prediction_outcome; 
+
+    // for MEM, we don't have mem stage anymore 
+    MEM_SIZE mem_size; 
+    logic    rd_unsigned;
+} EXECUTE_PACKET; */
 
 
 `ifndef SYNTH 
@@ -1047,13 +1098,10 @@ typedef struct packed {
     logic valid; // indicate if entry is valid, we never clear this though since this is not cache.  
 } BTB_ENTRY; 
 
-// instruction queue
-typedef enum logic [1:0] {
-    EMPTY,
-    NON_EMPTY
-} FIFO_STATE;
 
 
+
+// typedef logic[7:0] BYTE_MASK; // this is the 8 bit mask indicating which bytes are modified in a memory block 
 typedef logic [`LOAD_NUM-1:0] LSQ_LOAD_MASK; 
 // when passed into dcache, this is a one-hot encoding indicating which load this is 
 // when returned from dcache, this is a mask indicating which loads have been served 
