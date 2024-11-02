@@ -2,7 +2,7 @@ class Solution {
 public:
     string convert(string s, int numRows) {
         std::string ret=s;
-        if(s.size()==1) return ret;
+        if(numRows==1) return ret;
         int ret_idx=0;
         int i=0, j=numRows-1;
         int cnt=0;
@@ -14,14 +14,16 @@ public:
         for(int k=1; k<numRows-1; k++){
             cnt=0;
             int flag=0;
+            int target_idx=k;
+            ret[ret_idx++]=s[target_idx];
             while(1){
-                int target_idx=0;
                 if(!flag){
-                    target_idx = k+2*cnt*(numRows-1-k);
+                    target_idx = target_idx+2*(numRows-1-k);
                 }else{
-                    target_idx = k+2*cnt*k;
+                    target_idx = target_idx+2*k;
                 }
                 if(target_idx>=s.size()) break;
+                //std::cout<<target_idx<< " "<<s[target_idx]<<" "<<flag<<std::endl;
                 ret[ret_idx++]=s[target_idx];
                 cnt++; 
                 flag=(flag==0);
