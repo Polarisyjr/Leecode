@@ -18,6 +18,4 @@ public:
         s.resize(right - 1);
         return s;
     }
-
-
 };
