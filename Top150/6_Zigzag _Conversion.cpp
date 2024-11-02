@@ -2,6 +2,7 @@ class Solution {
 public:
     string convert(string s, int numRows) {
         std::string ret=s;
+        if(s.size()==1) return ret;
         int ret_idx=0;
         int i=0, j=numRows-1;
         int cnt=0;
