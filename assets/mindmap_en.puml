@@ -1,0 +1,39 @@
+@startmindmap
+* Data Structures & Algorithms
+** Arrays
+*** Array Operations
+**** Prefix Sum
+**** Difference Array
+**** 2D Arrays
+*** Two-Pointer Techniques
+**** Two Pointers on Arrays
+**** Sliding Window
+**** Binary Search
+**** Randomized Algorithms
+*** Fundamental Data Structures
+**** Circular Array
+**** Hashing
+**** Stack & Queue
+**** Design
+*** Advanced Data Structures
+**** Binary Search Tree (BST)
+**** Trie
+**** Heap
+**** Graph
+*** Other Algorithms
+**** Mathematics
+**** Greedy Algorithm
+** Linked Lists
+*** Two Pointers on Linked Lists
+*** Recursion
+** Binary Trees
+*** Recursive Traversal
+**** Subproblem Perspective
+***** Divide and Conquer
+***** Dynamic Programming
+*** Level-Order Traversal
+**** Breadth-First Search (BFS)
+***** Shortest Path
+@endmindmap
+
+
