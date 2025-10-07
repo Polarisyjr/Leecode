@@ -1,19 +1,20 @@
-#include <vector>
-using namespace std;
-
-struct ListNode {
-    int val;
-    ListNode* next;
-    ListNode(int x) : val(x), next(nullptr) {}
-};
-
+/**
+ * Definition for singly-linked list.
+ * struct ListNode {
+ *     int val;
+ *     ListNode *next;
+ *     ListNode(int x) : val(x), next(NULL) {}
+ * };
+ */
 class Solution {
 public:
-    // Return the node at which the two lists intersect, or nullptr if they do not intersect.
-    ListNode* getIntersectionNode(ListNode* headA, ListNode* headB) {
-        (void)headA; (void)headB;
-        return nullptr;
+    ListNode *getIntersectionNode(ListNode *headA, ListNode *headB) {
+        ListNode* p1 = headA;
+        ListNode* p2 = headB;
+        while (p1 != p2) {
+            p1 = p1 ? p1->next : headB;
+            p2 = p2 ? p2->next : headA;
+        }
+        return p1;
     }
 };
-
-
